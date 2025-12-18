@@ -1,0 +1,106 @@
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+from typing import Dict, List
+
+import numpy as np
+import torch
+from torchvision import transforms
+from torchvision.utils import save_image
+
+from scripts.data import ChewingGumDataset
+from scripts.model import SimpleVAE
+from scripts import utils
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run inference with trained VAE and generate heatmaps.")
+    parser.add_argument("--checkpoint", type=str, required=True, help="Path to a saved VAE checkpoint.")
+    parser.add_argument("--csv", type=str, default="data/image_anno.csv")
+    parser.add_argument("--root", type=str, default=".")
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--limit", type=int, default=None, help="Limit number of samples for quick runs.")
+    parser.add_argument("--output-dir", type=str, default="artifacts/inference")
+    parser.add_argument("--threshold", type=float, default=0.5, help="Threshold on heatmap for binary mask.")
+    parser.add_argument("--seed", type=int, default=42)
+    return parser.parse_args()
+
+
+def load_model(ckpt_path: Path, device: torch.device) -> SimpleVAE:
+    ckpt = utils.load_checkpoint(ckpt_path, map_location=device)
+    latent_dim = ckpt.get("args", {}).get("latent_dim", 128)
+    model = SimpleVAE(in_channels=3, latent_dim=latent_dim).to(device)
+    model.load_state_dict(ckpt["model_state"])
+    model.eval()
+    return model
+
+
+def evaluate_masks(heatmap: np.ndarray, mask: torch.Tensor, threshold: float) -> Dict[str, float]:
+    pred = (heatmap >= threshold).astype(np.uint8)
+    target = (mask.squeeze().cpu().numpy() > 0.5).astype(np.uint8)
+    intersection = (pred & target).sum()
+    union = (pred | target).sum()
+    iou = intersection / (union + 1e-8)
+    return {"iou": float(iou), "intersection": int(intersection), "union": int(union)}
+
+
+def run():
+    args = parse_args()
+    utils.set_seed(args.seed)
+    device = utils.get_device()
+    model = load_model(Path(args.checkpoint), device)
+
+    transform = transforms.Compose(
+        [
+            transforms.Resize((256, 256)),
+            transforms.ToTensor(),
+        ]
+    )
+    dataset = ChewingGumDataset(csv_path=args.csv, root=args.root, transform=transform)
+    if args.limit:
+        dataset.entries = dataset.entries[: args.limit]
+
+    loader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+    out_dir = Path(args.output_dir)
+    overlay_dir = out_dir / "overlays"
+    recon_dir = out_dir / "reconstructions"
+    stats: List[Dict] = []
+
+    with torch.no_grad():
+        for batch in loader:
+            imgs = batch["image"].to(device)
+            recon, _, _ = model(imgs)
+            for idx in range(imgs.size(0)):
+                original = imgs[idx]
+                reconstructed = recon[idx]
+                heatmap = utils.reconstruction_heatmap(original, reconstructed)
+                path = Path(batch["path"][idx])
+                fname = path.stem
+
+                recon_path = recon_dir / f"{fname}_recon.png"
+                save_image(reconstructed, recon_path)
+
+                np_image = np.transpose(original.cpu().numpy(), (1, 2, 0))
+                utils.save_heatmap_overlay(np_image, heatmap, overlay_dir / f"{fname}_overlay.png")
+
+                sample_stats = {
+                    "image": str(path),
+                    "mean_error": float(heatmap.mean()),
+                    "max_error": float(heatmap.max()),
+                    "label": batch["label"][idx],
+                }
+                if batch["has_mask"][idx]:
+                    mask_stats = evaluate_masks(heatmap, batch["mask"][idx], args.threshold)
+                    sample_stats.update(mask_stats)
+                stats.append(sample_stats)
+
+    utils.save_json_stats(stats, out_dir / "stats.json")
+    print(f"Saved reconstructions to {recon_dir}")
+    print(f"Saved heatmap overlays to {overlay_dir}")
+    print(f"Saved stats to {out_dir / 'stats.json'}")
+
+
+if __name__ == "__main__":
+    run()
