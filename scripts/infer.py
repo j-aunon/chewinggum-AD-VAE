@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import json
+import sys
 from pathlib import Path
 from typing import Dict, List
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import numpy as np
 import torch
@@ -24,17 +30,41 @@ def parse_args():
     parser.add_argument("--limit", type=int, default=None, help="Limit number of samples for quick runs.")
     parser.add_argument("--output-dir", type=str, default="artifacts/inference")
     parser.add_argument("--threshold", type=float, default=0.5, help="Threshold on heatmap for binary mask.")
+    parser.add_argument("--split", type=str, default=None, choices=["train", "val", "test"])
+    parser.add_argument("--split-file", type=str, default=None, help="Optional split file; defaults to checkpoint metadata.")
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
 
-def load_model(ckpt_path: Path, device: torch.device) -> SimpleVAE:
+def load_model(ckpt_path: Path, device: torch.device) -> Dict:
     ckpt = utils.load_checkpoint(ckpt_path, map_location=device)
     latent_dim = ckpt.get("args", {}).get("latent_dim", 128)
     model = SimpleVAE(in_channels=3, latent_dim=latent_dim).to(device)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
-    return model
+    return {"model": model, "ckpt": ckpt}
+
+
+def load_split_paths(args, ckpt: Dict, root: Path) -> set[str]:
+    if not args.split:
+        return set()
+    split_file = args.split_file or ckpt.get("split_file")
+    if not split_file:
+        raise ValueError("Split requested but no split file found in args or checkpoint.")
+    split_path = Path(split_file)
+    if not split_path.is_file():
+        raise FileNotFoundError(f"Split file not found: {split_path}")
+    payload = json.loads(split_path.read_text())
+    if args.split not in payload:
+        raise KeyError(f"Split '{args.split}' not found in {split_path}")
+    normalized = set()
+    for entry in payload[args.split]:
+        path = Path(entry)
+        if path.is_absolute():
+            normalized.add(utils.normalize_path(path, root))
+        else:
+            normalized.add(str(path))
+    return normalized
 
 
 def evaluate_masks(heatmap: np.ndarray, mask: torch.Tensor, threshold: float) -> Dict[str, float]:
@@ -50,7 +80,9 @@ def run():
     args = parse_args()
     utils.set_seed(args.seed)
     device = utils.get_device()
-    model = load_model(Path(args.checkpoint), device)
+    loaded = load_model(Path(args.checkpoint), device)
+    model = loaded["model"]
+    split_paths = load_split_paths(args, loaded["ckpt"], Path(args.root))
 
     transform = transforms.Compose(
         [
@@ -59,6 +91,10 @@ def run():
         ]
     )
     dataset = ChewingGumDataset(csv_path=args.csv, root=args.root, transform=transform)
+    if split_paths:
+        dataset.entries = [
+            entry for entry in dataset.entries if utils.normalize_path(entry["image"], Path(args.root)) in split_paths
+        ]
     if args.limit:
         dataset.entries = dataset.entries[: args.limit]
 
@@ -66,6 +102,8 @@ def run():
     out_dir = Path(args.output_dir)
     overlay_dir = out_dir / "overlays"
     recon_dir = out_dir / "reconstructions"
+    overlay_dir.mkdir(parents=True, exist_ok=True)
+    recon_dir.mkdir(parents=True, exist_ok=True)
     stats: List[Dict] = []
 
     with torch.no_grad():
