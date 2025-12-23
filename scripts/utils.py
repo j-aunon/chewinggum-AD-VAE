@@ -3,19 +3,23 @@ from __future__ import annotations
 import json
 import random
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Iterable
 
-import matplotlib.pyplot as plt
 import numpy as np
+from PIL import Image
 import torch
 import torch.nn.functional as F
+from matplotlib import cm
 
 
-def set_seed(seed: int = 42):
+def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def get_device(prefer_cuda: bool = True) -> torch.device:
@@ -24,78 +28,76 @@ def get_device(prefer_cuda: bool = True) -> torch.device:
     return torch.device("cpu")
 
 
-def save_checkpoint(state: Dict, path: Path):
+def save_checkpoint(payload: Dict[str, Any], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(state, path)
+    torch.save(payload, path)
 
 
-def load_checkpoint(path: Path, map_location: Optional[str] = None):
+def load_checkpoint(path: Path, map_location: torch.device | str | None = None) -> Dict[str, Any]:
     return torch.load(path, map_location=map_location)
 
 
-def reconstruction_heatmap(input_tensor: torch.Tensor, recon_tensor: torch.Tensor) -> np.ndarray:
-    with torch.no_grad():
-        diff = torch.abs(input_tensor - recon_tensor).mean(dim=0, keepdim=True)  # 1 x H x W
-        diff = (diff - diff.min()) / (diff.max() - diff.min() + 1e-8)
-    return diff.squeeze().cpu().numpy()
-
-
-def save_heatmap_overlay(image: np.ndarray, heatmap: np.ndarray, out_path: Path, cmap: str = "inferno"):
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.figure(figsize=(6, 6))
-    plt.imshow(image)
-    plt.imshow(heatmap, cmap=cmap, alpha=0.5)
-    plt.axis("off")
-    plt.tight_layout()
-    plt.savefig(out_path)
-    plt.close()
-
-
-def save_json_stats(stats: Dict, path: Path):
+def save_json_stats(payload: Any, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(stats, indent=2))
+    with path.open("w") as f:
+        json.dump(payload, f, indent=2)
 
 
-def normalize_path(path: Path, root: Path) -> str:
+def normalize_path(path: Path | str, root: Path) -> str:
+    path_obj = Path(path)
+    root_obj = Path(root)
     try:
-        return str(path.relative_to(root))
-    except ValueError:
-        return str(path)
+        rel = path_obj.resolve().relative_to(root_obj.resolve())
+        return rel.as_posix()
+    except Exception:
+        return path_obj.as_posix()
 
 
-def _gaussian_window(window_size: int, sigma: float, channel: int, device, dtype) -> torch.Tensor:
-    coords = torch.arange(window_size, device=device, dtype=dtype) - window_size // 2
-    g = torch.exp(-(coords ** 2) / (2 * sigma**2))
-    g = g / g.sum()
-    window_1d = g.unsqueeze(1)
-    window_2d = window_1d @ window_1d.t()
-    window = window_2d.expand(channel, 1, window_size, window_size).contiguous()
-    return window
+def reconstruction_heatmap(original: torch.Tensor, reconstructed: torch.Tensor) -> np.ndarray:
+    error = torch.abs(reconstructed - original).mean(dim=0)
+    return error.detach().cpu().numpy()
 
 
-def ssim(
-    img1: torch.Tensor,
-    img2: torch.Tensor,
-    window_size: int = 11,
-    sigma: float = 1.5,
-    data_range: float = 1.0,
-) -> torch.Tensor:
+def ssim(img1: torch.Tensor, img2: torch.Tensor, window_size: int = 11) -> torch.Tensor:
     if img1.shape != img2.shape:
-        raise ValueError("SSIM expects img1 and img2 with the same shape.")
-    channel = img1.size(1)
-    window = _gaussian_window(window_size, sigma, channel, img1.device, img1.dtype)
-    padding = window_size // 2
-    mu1 = F.conv2d(img1, window, padding=padding, groups=channel)
-    mu2 = F.conv2d(img2, window, padding=padding, groups=channel)
+        raise ValueError("SSIM expects img1 and img2 to have the same shape.")
+    if img1.dim() != 4:
+        raise ValueError("SSIM expects tensors with shape (N, C, H, W).")
+
+    pad = window_size // 2
+    mu1 = F.avg_pool2d(img1, window_size, 1, pad)
+    mu2 = F.avg_pool2d(img2, window_size, 1, pad)
+
     mu1_sq = mu1.pow(2)
     mu2_sq = mu2.pow(2)
     mu1_mu2 = mu1 * mu2
-    sigma1_sq = F.conv2d(img1 * img1, window, padding=padding, groups=channel) - mu1_sq
-    sigma2_sq = F.conv2d(img2 * img2, window, padding=padding, groups=channel) - mu2_sq
-    sigma12 = F.conv2d(img1 * img2, window, padding=padding, groups=channel) - mu1_mu2
-    c1 = (0.01 * data_range) ** 2
-    c2 = (0.03 * data_range) ** 2
-    ssim_map = ((2 * mu1_mu2 + c1) * (2 * sigma12 + c2)) / (
-        (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2)
-    )
-    return ssim_map.mean(dim=(1, 2, 3))
+
+    sigma1_sq = F.avg_pool2d(img1 * img1, window_size, 1, pad) - mu1_sq
+    sigma2_sq = F.avg_pool2d(img2 * img2, window_size, 1, pad) - mu2_sq
+    sigma12 = F.avg_pool2d(img1 * img2, window_size, 1, pad) - mu1_mu2
+
+    c1 = 0.01 ** 2
+    c2 = 0.03 ** 2
+    numerator = (2 * mu1_mu2 + c1) * (2 * sigma12 + c2)
+    denominator = (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2)
+    ssim_map = numerator / (denominator + 1e-8)
+
+    per_channel = ssim_map.flatten(2).mean(dim=2)
+    return per_channel.mean(dim=1)
+
+
+def save_heatmap_overlay(image: np.ndarray, heatmap: np.ndarray, path: Path, alpha: float = 0.5) -> None:
+    if image.max() > 1.0:
+        img = image.astype(np.float32) / 255.0
+    else:
+        img = image.astype(np.float32)
+
+    heat = heatmap.astype(np.float32)
+    heat = (heat - heat.min()) / (heat.max() - heat.min() + 1e-8)
+    colored = cm.get_cmap("jet")(heat)[..., :3]
+
+    overlay = (1 - alpha) * img + alpha * colored
+    overlay = np.clip(overlay * 255.0, 0, 255).astype(np.uint8)
+    out = Image.fromarray(overlay)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out.save(path)

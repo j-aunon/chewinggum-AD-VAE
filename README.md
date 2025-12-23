@@ -3,8 +3,9 @@ A barebones PyTorch baseline for unsupervised anomaly detection on the chewing g
 
 ### Quick start
 - Install deps: `pip install torch torchvision pillow matplotlib numpy`
-- Train (saves checkpoints under `artifacts/checkpoints`): `python scripts/train.py --csv data/image_anno.csv --root .`
+- Train (ResNet18 VAE, saves checkpoints under `artifacts/checkpoints`): `python scripts/train.py --csv data/image_anno.csv --root .`
 - Infer (writes reconstructions, overlays, stats): `python scripts/infer.py --checkpoint <ckpt.pt> --csv data/image_anno.csv --root . --output-dir artifacts/inference`
+- TensorBoard (training curves + sample reconstructions): `tensorboard --logdir artifacts/tensorboard`
 
 ### Data expectations
 - `data/image_anno.csv` with columns `image, mask, label`; images/masks are resolved under the repo root (rows may start with `chewinggum/`).

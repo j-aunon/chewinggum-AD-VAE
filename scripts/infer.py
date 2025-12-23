@@ -16,7 +16,7 @@ from torchvision import transforms
 from torchvision.utils import save_image
 
 from scripts.data import ChewingGumDataset
-from scripts.model import SimpleVAE
+from scripts.model import ResNetVAE
 from scripts import utils
 
 
@@ -38,11 +38,11 @@ def parse_args():
 
 def load_model(ckpt_path: Path, device: torch.device) -> Dict:
     ckpt = utils.load_checkpoint(ckpt_path, map_location=device)
-    latent_dim = ckpt.get("args", {}).get("latent_dim", 128)
-    model = SimpleVAE(in_channels=3, latent_dim=latent_dim).to(device)
+    latent_dim = ckpt.get("args", {}).get("latent_dim", 256)
+    model = ResNetVAE(in_channels=3, latent_dim=latent_dim, feature_size=8).to(device)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
-    return {"model": model, "ckpt": ckpt}
+    return {"model": model, "ckpt": ckpt, "model_name": "resnet"}
 
 
 def load_split_paths(args, ckpt: Dict, root: Path) -> set[str]:
