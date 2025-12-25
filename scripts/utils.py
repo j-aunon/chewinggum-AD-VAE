@@ -22,8 +22,20 @@ def set_seed(seed: int) -> None:
     torch.backends.cudnn.benchmark = False
 
 
+def _is_rocm_build() -> bool:
+    return getattr(torch.version, "hip", None) is not None
+
+
+def _ensure_nvidia_cuda() -> None:
+    if _is_rocm_build():
+        raise RuntimeError(
+            "ROCm/HIP build of PyTorch detected. This project assumes an NVIDIA CUDA PyTorch build."
+        )
+
+
 def get_device(prefer_cuda: bool = True) -> torch.device:
     if prefer_cuda and torch.cuda.is_available():
+        _ensure_nvidia_cuda()
         return torch.device("cuda")
     return torch.device("cpu")
 

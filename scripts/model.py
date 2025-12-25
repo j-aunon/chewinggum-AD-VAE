@@ -12,50 +12,49 @@ class ResBlock(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, stride: int = 1):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, stride=stride, padding=1, bias=False)
-        self.gn1 = nn.GroupNorm(min(32, out_channels), out_channels)
+        self.bn1 = nn.BatchNorm2d(out_channels)
         self.conv2 = nn.Conv2d(out_channels, out_channels, 3, stride=1, padding=1, bias=False)
-        self.gn2 = nn.GroupNorm(min(32, out_channels), out_channels)
+        self.bn2 = nn.BatchNorm2d(out_channels)
         self.relu = nn.ReLU(inplace=True)
         if stride != 1 or in_channels != out_channels:
             self.skip = nn.Sequential(
                 nn.Conv2d(in_channels, out_channels, 1, stride=stride, bias=False),
-                nn.GroupNorm(min(32, out_channels), out_channels),
+                nn.BatchNorm2d(out_channels),
             )
         else:
             self.skip = nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         identity = self.skip(x)
-        out = self.relu(self.gn1(self.conv1(x)))
-        out = self.gn2(self.conv2(out))
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
         out = self.relu(out + identity)
         return out
 
 
 class UpBlock(nn.Module):
-    """Upsampling block WITHOUT attention for CPU compatibility"""
+    """Upsampling block."""
     def __init__(self, in_channels: int, out_channels: int, use_attention: bool = False):
         super().__init__()
         self.up = nn.ConvTranspose2d(in_channels, out_channels, 4, stride=2, padding=1, bias=False)
-        self.gn = nn.GroupNorm(min(32, out_channels), out_channels)
+        self.bn = nn.BatchNorm2d(out_channels)
         self.relu = nn.ReLU(inplace=True)
         self.res = ResBlock(out_channels, out_channels, stride=1)
-        # DISABLE attention for CPU - uses too much memory
         self.attention = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.relu(self.gn(self.up(x)))
+        x = self.relu(self.bn(self.up(x)))
         x = self.res(x)
         return x
 
 
 class ImprovedEncoder(nn.Module):
-    """CPU-optimized encoder"""
+    """Encoder network."""
     def __init__(self, in_channels: int = 3, latent_dim: int = 512, feature_size: int = 16):
         super().__init__()
         self.initial = nn.Sequential(
             nn.Conv2d(in_channels, 64, 7, stride=2, padding=3, bias=False),
-            nn.GroupNorm(32, 64),
+            nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
         )
         
@@ -102,7 +101,7 @@ class ImprovedEncoder(nn.Module):
 
 
 class ImprovedDecoder(nn.Module):
-    """CPU-optimized decoder WITHOUT attention"""
+    """Decoder network."""
     def __init__(self, out_channels: int = 3, latent_dim: int = 512, feature_size: int = 16):
         super().__init__()
         self.feature_size = feature_size
@@ -113,7 +112,6 @@ class ImprovedDecoder(nn.Module):
             nn.Linear(latent_dim * 2, 512 * feature_size * feature_size)
         )
         
-        # All upsampling blocks WITHOUT attention
         self.up1 = UpBlock(512, 512, use_attention=False)
         self.up2 = UpBlock(512, 256, use_attention=False)
         self.up3 = UpBlock(256, 128, use_attention=False)
@@ -123,7 +121,7 @@ class ImprovedDecoder(nn.Module):
         self.refine = nn.Sequential(
             ResBlock(32, 32),
             nn.Conv2d(32, 16, 3, padding=1),
-            nn.GroupNorm(16, 16),
+            nn.BatchNorm2d(16),
             nn.ReLU(inplace=True),
         )
         
@@ -183,7 +181,7 @@ class ImprovedVAE(nn.Module):
 
 
 class VGGPerceptualLoss(nn.Module):
-    """VGG perceptual loss - CPU compatible"""
+    """VGG perceptual loss."""
     def __init__(self):
         super().__init__()
         try:

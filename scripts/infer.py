@@ -32,14 +32,22 @@ def parse_args():
     parser.add_argument("--threshold", type=float, default=0.5, help="Threshold on heatmap for binary mask.")
     parser.add_argument("--split", type=str, default=None, choices=["train", "val", "test"])
     parser.add_argument("--split-file", type=str, default=None, help="Optional split file; defaults to checkpoint metadata.")
+    parser.add_argument(
+        "--feature-size",
+        type=int,
+        default=None,
+        help="Decoder/encoder feature size; defaults to the value stored in the checkpoint.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
 
-def load_model(ckpt_path: Path, device: torch.device) -> Dict:
+def load_model(ckpt_path: Path, device: torch.device, feature_size: int | None = None) -> Dict:
     ckpt = utils.load_checkpoint(ckpt_path, map_location=device)
     latent_dim = ckpt.get("args", {}).get("latent_dim", 256)
-    model = ResNetVAE(in_channels=3, latent_dim=latent_dim, feature_size=8).to(device)
+    ckpt_feature_size = ckpt.get("args", {}).get("feature_size")
+    resolved_feature_size = feature_size if feature_size is not None else (ckpt_feature_size or 8)
+    model = ResNetVAE(in_channels=3, latent_dim=latent_dim, feature_size=resolved_feature_size).to(device)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
     return {"model": model, "ckpt": ckpt, "model_name": "resnet"}
@@ -80,7 +88,7 @@ def run():
     args = parse_args()
     utils.set_seed(args.seed)
     device = utils.get_device()
-    loaded = load_model(Path(args.checkpoint), device)
+    loaded = load_model(Path(args.checkpoint), device, feature_size=args.feature_size)
     model = loaded["model"]
     split_paths = load_split_paths(args, loaded["ckpt"], Path(args.root))
 
